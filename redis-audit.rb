@@ -75,10 +75,11 @@ class RedisAudit
   # Configure regular expressions here if you need to guarantee that certain keys are grouped together
   @@key_group_regex_list = []
 
-  def initialize(redis, sample_size)
+  def initialize(redis, sample_size, window_size)
     @redis = redis
     @keys = Hash.new {|h,k| h[k] = KeyStats.new}
     @sample_size = sample_size
+    @window_size = window_size
     @dbsize = 0
   end
 
@@ -88,31 +89,39 @@ class RedisAudit
     if @sample_size == 0 || @sample_size.nil?
       @sample_size = (0.1 * @dbsize).to_i
     end
+    if @window_size == 0 || @window_size.nil?
+      @window_size = 10
+    end
 
     if @sample_size < @dbsize
       puts "Sampling #{@sample_size} keys..."
-      sample_progress = @sample_size/10
+      sample_progress = @sample_size/@window_size
 
       @sample_size.times do |index|
+        print '.' if (index % 5) == 0
         key = @redis.randomkey
         audit_key(key)
         if sample_progress > 0 && (index + 1) % sample_progress == 0
           puts "#{index + 1} keys sampled - #{(((index + 1)/@sample_size.to_f) * 100).round}% complete - #{Time.now}"
+          sleep 1
         end
       end
     else
-      sample_progress = @dbsize/10
+      sample_progress = @dbsize/@window_size
 
       puts "Getting a list of all #{@dbsize} keys..."
       keys = @redis.keys("*")
       puts "Auditing #{@dbsize} keys..."
       keys.each_with_index do |key, index|
+        print '.' if (index % 5) == 0
         audit_key(key)
         if sample_progress > 0 && (index + 1) % sample_progress == 0
           puts "#{index + 1} keys sampled - #{(((index + 1)/@dbsize.to_f) * 100).round}% complete - #{Time.now}"
+          sleep 1
         end
       end
     end
+    puts
   end
 
   def audit_key(key)
@@ -213,6 +222,11 @@ class RedisAudit
       complete_serialized_length = 0
     end
 
+    t_tag = Time.now.strftime('%Y-%m-%d-%H-%M-%S')
+    filename = "result-instance-1-#{t_tag}.txt"
+    output = File.open(filename, 'w')
+    $stdout.reopen(filename, 'w')
+
     puts "DB has #{@dbsize} keys"
     puts "Sampled #{output_bytes(complete_serialized_length)} of Redis memory"
     puts
@@ -296,16 +310,12 @@ OptionParser.new do |opts|
     options[:sample_size] = sample_size.to_i
   end
 
+  opts.on("-w", "--window NUM", "Window Size") do |window_size|
+    options[:window_size] = window_size.to_i
+  end
+
   opts.on("-t", "--timeout NUM", "Redis timeout") do |timeout|
     options[:timeout] = timeout.to_i
-  end
-
-  opts.on("-d", "--driver DRIVER", "Redis driver") do |driver|
-    options[:driver] = driver
-  end
-
-  opts.on("-T", "--tasks TASKS", "Split sample keys into # of tasks") do |tasks|
-    options[:tasks] = tasks.to_i
   end
 
   opts.on('--help', 'Displays Help') do
@@ -320,48 +330,46 @@ if options[:host].nil? && options[:url].nil?
     puts "Run redis-audit.rb --help for information on how to use this tool."
     exit 1
   else
-    options[:host]        = ARGV[0]
-    options[:port]        = ARGV[1].to_i
-    options[:dbnum]       = ARGV[2].to_i
+    options[:host] = ARGV[0]
+    options[:port] = ARGV[1].to_i
+    options[:dbnum] = ARGV[2].to_i
     options[:sample_size] = ARGV[3].to_i
   end
 end
 
-# Default redis timeout to 5 seconds if not given
+# Default timeout to 5 if not given
 options[:timeout] ||= 5
 
 # create our connection to the redis db
-if options[:url]
+if !options[:url].nil?
   redis = Redis.new(:url => options[:url], :timeout => options[:timeout])
 else
   # with url empty, assume that --host has been set, but since we don't enforce
   # port or dbnum to be set, allow sane defaults
   # set default port if no port is set
-  options[:port] ||= 6379
-
+  if options[:port].nil?
+    options[:port] = 6379
+  end
   # set default dbnum if no dbnum is set
-  options[:dbnum] ||= 0
-
-  redis = Redis.new(
-                    :host     => options[:host]   ,
-                    :port     => options[:port]   ,
-                    :db       => options[:dbnum]  ,
-                    :timeout  => options[:timeout]
-                   )
+  if options[:dbnum].nil?
+    options[:dbnum] = 0
+  end
+  redis = Redis.new(:host => options[:host], :port => options[:port], :db => options[:dbnum], :timeout => options[:timeout])
 end
 
 # set sample_size to a default if not passed in
-options[:sample_size] ||= 0
-
-redis_params = {}
+if options[:sample_size].nil?
+  options[:sample_size] = 0
+end
 
 # audit our data
-redis = Redis.new(params)
-auditor = RedisAudit.new(redis, options[:sample_size])
-if options[:url]
+auditor = RedisAudit.new(redis, options[:sample_size], options[:window_size])
+if !options[:url].nil?
   puts "Auditing #{options[:url]} sampling #{options[:sample_size]} keys"
 else
   puts "Auditing #{options[:host]}:#{options[:port]} dbnum:#{options[:dbnum]} sampling #{options[:sample_size]} keys"
 end
+puts "Window size: #{options[:window_size] || 10}"
 auditor.audit_keys
+puts 'Audit done!'
 auditor.output_stats
