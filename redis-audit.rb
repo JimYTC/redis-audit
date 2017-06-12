@@ -22,6 +22,7 @@
 
 require 'bundler/setup'
 require 'redis'
+require 'redis/connection/hiredis'
 require 'optparse'
 
 # Container class for stats around a key group
@@ -155,8 +156,8 @@ class RedisAudit
     length_of_best_match = 0
     threshold = key.length / 3
     matching_portion = nil
-    key_codepoints = key.codepoints
-
+    key_codepoints = key.codepoints.to_a
+    
     @keys.keys.each do |current_key|
       next if matching_key && !current_key.start_with?(matching_portion) # we know it wont be longer
       length_of_match = 0
@@ -302,6 +303,10 @@ OptionParser.new do |opts|
     options[:port] = port
   end
 
+  opts.on("-a", "--password PASSWORD", "Redis Password") do |password|
+    options[:password] = password
+  end
+
   opts.on("-d", "--dbnum DBNUM", "Redis DB Number") do |dbnum|
     options[:dbnum] = dbnum
   end
@@ -326,14 +331,15 @@ end.parse!
 
 # allows non-paramaterized/backwards compatible command line
 if options[:host].nil? && options[:url].nil?
-  if ARGV.length < 3 || ARGV.length > 4
+  if ARGV.length < 4 || ARGV.length > 5
     puts "Run redis-audit.rb --help for information on how to use this tool."
     exit 1
   else
     options[:host] = ARGV[0]
     options[:port] = ARGV[1].to_i
-    options[:dbnum] = ARGV[2].to_i
-    options[:sample_size] = ARGV[3].to_i
+    options[:password] = ARGV[2].to_i
+    options[:dbnum] = ARGV[3].to_i
+    options[:sample_size] = ARGV[4].to_i
   end
 end
 
@@ -354,7 +360,12 @@ else
   if options[:dbnum].nil?
     options[:dbnum] = 0
   end
-  redis = Redis.new(:host => options[:host], :port => options[:port], :db => options[:dbnum], :timeout => options[:timeout])
+  # don't pass the password argument unless it is set
+  if options[:password].nil?
+    redis = Redis.new(:host => options[:host], :port => options[:port], :db => options[:dbnum], :timeout => options[:timeout])
+  else
+    redis = Redis.new(:host => options[:host], :port => options[:port], :password => options[:password], :db => options[:dbnum], :timeout => options[:timeout])
+  end
 end
 
 # set sample_size to a default if not passed in
